@@ -50,8 +50,6 @@ STOP_WORDS = {
     "les",
     "en",
     "et",
-    "st",
-    "ste",
 }
 
 
@@ -87,6 +85,7 @@ class Dot:
     y: float
     size: float
     count: int
+    colors: tuple[tuple[float, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,6 +95,56 @@ class Match:
     dot: Dot
     distance: float
     confidence: str
+    score: float = 0.0
+    color_distance: float | None = None
+
+
+LINE_COLORS = {
+    "METRO:1": "#ffcd00",
+    "METRO:2": "#003ca6",
+    "METRO:3": "#837902",
+    "METRO:3b": "#6ec4e8",
+    "METRO:4": "#cf009e",
+    "METRO:5": "#ff7e2e",
+    "METRO:6": "#6eca97",
+    "METRO:7": "#fa9aba",
+    "METRO:7b": "#6eca97",
+    "METRO:8": "#e19bdf",
+    "METRO:9": "#b6bd00",
+    "METRO:10": "#c9910d",
+    "METRO:11": "#704b1c",
+    "METRO:12": "#007852",
+    "METRO:13": "#6ec4e8",
+    "METRO:14": "#62259d",
+    "RER:A": "#e2231a",
+    "RER:B": "#4b92db",
+    "RER:C": "#f6c400",
+    "RER:D": "#00a88f",
+    "RER:E": "#c04191",
+    "TRAM:1": "#0055a4",
+    "TRAM:2": "#c6a500",
+    "TRAM:3A": "#f28e1c",
+    "TRAM:3B": "#00a88f",
+    "TRAM:4": "#6f263d",
+    "TRAM:5": "#7b6469",
+    "TRAM:6": "#e4007c",
+    "TRAM:7": "#6eca97",
+    "TRAM:8": "#a05eb5",
+    "TRAM:9": "#b6bd00",
+    "TRAM:10": "#00a3e0",
+    "TRAM:11": "#8dc63f",
+    "TRAM:12": "#00a3e0",
+    "TRAM:13": "#702082",
+}
+
+TYPE_COLORS = {
+    "METRO": "#4a5568",
+    "RER": "#2563eb",
+    "TRAIN": "#64748b",
+    "TRAM": "#0f766e",
+    "TRAMWAY": "#0f766e",
+    "NAVETTE": "#9333ea",
+}
 
 
 def normalize(value: str) -> str:
@@ -133,6 +182,28 @@ def fetch_stations() -> list[Station]:
         conn.close()
 
 
+def fetch_station_line_colors() -> dict[int, list[tuple[float, float, float, float]]]:
+    conn = pymysql.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ls.station_id, l.type, l.code, l.color
+                FROM line_stations ls
+                JOIN line l ON l.id = ls.line_id
+                """
+            )
+            station_colors: defaultdict[int, list[tuple[float, float, float, float]]] = defaultdict(list)
+            for station_id, line_type, code, color in cur.fetchall():
+                hex_color = color or LINE_COLORS.get(f"{str(line_type).upper()}:{str(code).upper()}")
+                hex_color = hex_color or TYPE_COLORS.get(str(line_type).upper())
+                if hex_color:
+                    station_colors[int(station_id)].append(hex_to_cmyk(hex_color))
+            return station_colors
+    finally:
+        conn.close()
+
+
 def update_matches(matches: Iterable[Match]) -> int:
     rows = [(m.dot.x, m.dot.y, m.station.id) for m in matches]
     if not rows:
@@ -147,8 +218,36 @@ def update_matches(matches: Iterable[Match]) -> int:
         conn.close()
 
 
+def hex_to_cmyk(hex_color: str) -> tuple[float, float, float, float]:
+    value = hex_color.strip().lstrip("#")
+    if len(value) != 6:
+        return (0.0, 0.0, 0.0, 1.0)
+    r = int(value[0:2], 16) / 255
+    g = int(value[2:4], 16) / 255
+    b = int(value[4:6], 16) / 255
+    k = 1 - max(r, g, b)
+    if k >= 1:
+        return (0.0, 0.0, 0.0, 1.0)
+    c = (1 - r - k) / (1 - k)
+    m = (1 - g - k) / (1 - k)
+    y = (1 - b - k) / (1 - k)
+    return (c, m, y, k)
+
+
+def is_useful_color(color) -> bool:
+    if not isinstance(color, tuple) or len(color) != 4:
+        return False
+    # Ignore pure white/transparent fills and black outlines. Route colors are
+    # the chromatic CMYK values carried by station marker objects.
+    if math.dist(color, (0.0, 0.0, 0.0, 0.0)) < 0.08:
+        return False
+    if math.dist(color, (0.0, 0.0, 0.0, 1.0)) < 0.08:
+        return False
+    return True
+
+
 def extract_dots(page) -> list[Dot]:
-    raw: list[tuple[float, float, float]] = []
+    raw: list[tuple[float, float, float, tuple[tuple[float, ...], ...]]] = []
     for obj in page.curves:
         if not obj.get("fill"):
             continue
@@ -163,13 +262,18 @@ def extract_dots(page) -> list[Dot]:
             continue
         x = (obj["x0"] + obj["x1"]) / 2
         y = (obj["top"] + obj["bottom"]) / 2
-        raw.append((x, y, max(width, height)))
+        colors = []
+        for key in ("stroking_color", "non_stroking_color"):
+            color = obj.get(key)
+            if is_useful_color(color):
+                colors.append(tuple(float(v) for v in color))
+        raw.append((x, y, max(width, height), tuple(colors)))
 
     # Many station dots are drawn as several concentric/overlapping circles.
     # Merge objects whose centers are essentially identical.
-    clusters: list[list[tuple[float, float, float]]] = []
+    clusters: list[list[tuple[float, float, float, tuple[tuple[float, ...], ...]]]] = []
     for item in raw:
-        x, y, _ = item
+        x, y, _, _ = item
         for cluster in clusters:
             cx = sum(v[0] for v in cluster) / len(cluster)
             cy = sum(v[1] for v in cluster) / len(cluster)
@@ -184,7 +288,12 @@ def extract_dots(page) -> list[Dot]:
         x = sum(v[0] for v in cluster) / len(cluster)
         y = sum(v[1] for v in cluster) / len(cluster)
         size = max(v[2] for v in cluster)
-        dots.append(Dot(x=x, y=y, size=size, count=len(cluster)))
+        colors = []
+        for item in cluster:
+            for color in item[3]:
+                if color not in colors:
+                    colors.append(color)
+        dots.append(Dot(x=x, y=y, size=size, count=len(cluster), colors=tuple(colors)))
     return dots
 
 
@@ -255,6 +364,12 @@ def extract_text_boxes(page) -> list[TextBox]:
                 if box:
                     boxes.append(box)
                     line_windows.append((line_idx, start, end, box))
+                if len(window) > 1 and all((right["x0"] - left["x1"]) <= 1.4 for left, right in zip(window, window[1:])):
+                    compact_text = "".join(w["text"] for w in window)
+                    compact_box = word_box(window, compact_text, "line")
+                    if compact_box and (not box or compact_box.norm != box.norm):
+                        boxes.append(compact_box)
+                        line_windows.append((line_idx, start, end, compact_box))
 
     # Multi-line labels often stack each word/short phrase directly below the
     # previous one. Build aligned combinations up to four nearby lines.
@@ -289,6 +404,37 @@ def extract_text_boxes(page) -> list[TextBox]:
                         boxes.append(merged)
                         new_active.append((nxt, text, norm, merged.x0, merged.x1, merged.top, merged.bottom))
             active = new_active
+
+    # Some labels share the same global text row with many unrelated labels, so
+    # line-index adjacency can miss a visually stacked pair. Add a direct
+    # spatial pass over short boxes to catch pairs like "Saint" + "Jacques".
+    short_boxes = [
+        box
+        for _, _, _, box in line_windows
+        if 1 <= len(box.norm.split()) <= 3 and box.x0 >= MAP_MIN_X
+    ]
+    short_boxes.sort(key=lambda box: (box.top, box.x0))
+    for idx, top_box in enumerate(short_boxes):
+        for bottom_box in short_boxes[idx + 1 :]:
+            gap = bottom_box.top - top_box.bottom
+            if gap > 22:
+                break
+            if gap < -2:
+                continue
+            overlap = min(top_box.x1, bottom_box.x1) - max(top_box.x0, bottom_box.x0)
+            center_gap = abs(top_box.cx - bottom_box.cx)
+            if overlap >= -8 or center_gap <= 34:
+                boxes.append(
+                    TextBox(
+                        text=f"{top_box.text} {bottom_box.text}",
+                        norm=normalize(f"{top_box.text} {bottom_box.text}"),
+                        x0=min(top_box.x0, bottom_box.x0),
+                        x1=max(top_box.x1, bottom_box.x1),
+                        top=min(top_box.top, bottom_box.top),
+                        bottom=max(top_box.bottom, bottom_box.bottom),
+                        source="stack",
+                    )
+                )
 
     # Deduplicate nearly identical boxes.
     unique: dict[tuple[str, int, int, int, int], TextBox] = {}
@@ -338,11 +484,60 @@ def name_variants(station: Station) -> set[str]:
                 no_stop = " ".join(t for t in tokens if t not in STOP_WORDS)
                 if no_stop:
                     variants.add(no_stop)
+                if "saint" in tokens:
+                    variants.add(" ".join("st" if t == "saint" else t for t in tokens))
+                if "sainte" in tokens:
+                    variants.add(" ".join("ste" if t == "sainte" else t for t in tokens))
+                if "porte" in tokens:
+                    variants.add(" ".join("pte" if t == "porte" else t for t in tokens))
+                if "grande" in tokens and "arche" in tokens:
+                    cut = tokens[: tokens.index("grande")]
+                    if cut:
+                        variants.add(" ".join(cut))
     return variants
 
 
-def choose_match(station: Station, boxes_by_norm: dict[str, list[TextBox]], dots: list[Dot]) -> Match | None:
+def dot_color_distance(dot: Dot, expected_colors: list[tuple[float, float, float, float]]) -> float | None:
+    if not dot.colors or not expected_colors:
+        return None
+    return min(math.dist(dot_color, expected) for dot_color in dot.colors for expected in expected_colors)
+
+
+def candidate_score(match: Match, expected_colors: list[tuple[float, float, float, float]]) -> Match:
+    color_distance = dot_color_distance(match.dot, expected_colors)
+    source_penalty = 0
+    confidence_penalty = 0 if match.confidence == "high" else 10
+    score = match.distance + source_penalty + confidence_penalty
+    if color_distance is not None:
+        if color_distance <= 0.24:
+            score -= 8
+        elif color_distance <= 0.42:
+            score -= 3
+        elif color_distance >= 0.85:
+            score += 12
+        elif color_distance >= 0.6:
+            score += 7
+        else:
+            score += 3
+    return Match(
+        station=match.station,
+        label=match.label,
+        dot=match.dot,
+        distance=match.distance,
+        confidence=match.confidence,
+        score=score,
+        color_distance=color_distance,
+    )
+
+
+def choose_match(
+    station: Station,
+    boxes_by_norm: dict[str, list[TextBox]],
+    dots: list[Dot],
+    station_line_colors: dict[int, list[tuple[float, float, float, float]]] | None = None,
+) -> Match | None:
     candidates: list[Match] = []
+    expected_colors = station_line_colors.get(station.id, []) if station_line_colors else []
     for norm in name_variants(station):
         for box in boxes_by_norm.get(norm, []):
             found = label_dot_match(box, dots)
@@ -350,15 +545,18 @@ def choose_match(station: Station, boxes_by_norm: dict[str, list[TextBox]], dots
                 continue
             dot, dist = found
             confidence = "high" if dist <= 24 else "medium"
-            candidates.append(Match(station=station, label=box, dot=dot, distance=dist, confidence=confidence))
+            candidates.append(
+                candidate_score(
+                    Match(station=station, label=box, dot=dot, distance=dist, confidence=confidence),
+                    expected_colors,
+                )
+            )
 
     if not candidates:
         return None
 
     def sort_key(match: Match) -> tuple[float, float, float]:
-        source_penalty = 0 if match.label.source == "line" else 4
-        confidence_penalty = 0 if match.confidence == "high" else 10
-        return (confidence_penalty + source_penalty + match.distance, match.label.x0, match.label.top)
+        return (match.score, match.label.x0, match.label.top)
 
     return sorted(candidates, key=sort_key)[0]
 
@@ -366,7 +564,8 @@ def choose_match(station: Station, boxes_by_norm: dict[str, list[TextBox]], dots
 def direct_search_boxes(page, station: Station) -> list[TextBox]:
     boxes: list[TextBox] = []
     seen_patterns: set[str] = set()
-    for raw_name in unique_names(station):
+    search_names = set(unique_names(station)) | name_variants(station)
+    for raw_name in search_names:
         candidates = {raw_name, raw_name.replace("-", " "), raw_name.replace("'", "’")}
         for candidate in candidates:
             tokens = [token for token in re.split(r"[\s\-–—]+", candidate.strip()) if token]
@@ -374,6 +573,7 @@ def direct_search_boxes(page, station: Station) -> list[TextBox]:
                 continue
             pattern = r"[\s\-–—]+".join(re.escape(token) for token in tokens)
             pattern = pattern.replace("'", r"['’]").replace("’", r"['’]")
+            pattern = rf"(?<![\wÀ-ÿ]){pattern}(?![\wÀ-ÿ])"
             if pattern in seen_patterns:
                 continue
             seen_patterns.add(pattern)
@@ -419,6 +619,7 @@ def main() -> int:
     args = parser.parse_args()
 
     stations = fetch_stations()
+    station_line_colors = fetch_station_line_colors()
     if args.limit:
         stations = stations[: args.limit]
 
@@ -436,7 +637,7 @@ def main() -> int:
         matches: list[Match] = []
         misses: list[Station] = []
         for station in stations:
-            match = choose_match(station, boxes_by_norm, dots)
+            match = choose_match(station, boxes_by_norm, dots, station_line_colors)
             if match:
                 matches.append(match)
             else:
@@ -449,7 +650,7 @@ def main() -> int:
         for station in misses:
             for box in direct_search_boxes(page, station):
                 boxes_by_norm[box.norm].append(box)
-            match = choose_match(station, boxes_by_norm, dots)
+            match = choose_match(station, boxes_by_norm, dots, station_line_colors)
             if match:
                 recovered.append(match)
             else:
@@ -469,6 +670,8 @@ def main() -> int:
             f"{match.station.id:4d} {match.station.name2 or match.station.name:<35} "
             f"-> x={match.dot.x:8.2f} y={match.dot.y:8.2f} "
             f"d={match.distance:5.1f} {match.confidence:6} "
+            f"score={match.score:6.1f} "
+            f"color={match.color_distance if match.color_distance is not None else '-'} "
             f"label={match.label.text!r} ({match.label.source})"
         )
     if misses:

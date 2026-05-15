@@ -194,8 +194,13 @@ def fetch_map_data() -> dict:
 
     lines = []
     for line in raw_lines:
-        points = []
-        if line["path_json"]:
+        member_points = [
+            {"x": float(member["x"]), "y": float(member["y"])}
+            for member in line_members.get(int(line["id"]), [])
+            if member["x"] is not None and member["y"] is not None
+        ]
+        points = member_points
+        if len(points) < 2 and line["path_json"]:
             try:
                 points = [
                     {"x": float(point[0]), "y": float(point[1])}
@@ -204,12 +209,6 @@ def fetch_map_data() -> dict:
                 ]
             except (TypeError, ValueError, json.JSONDecodeError):
                 points = []
-        if not points:
-            points = [
-                {"x": float(member["x"]), "y": float(member["y"])}
-                for member in line_members.get(int(line["id"]), [])
-                if member["x"] is not None and member["y"] is not None
-            ]
         points = spatially_order_points(points)
         lines.append(
             {
