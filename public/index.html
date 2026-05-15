@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Paris Metro D3 Map</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="rail">
+        <div class="brand">
+          <span class="mark">M</span>
+          <div>
+            <h1>Paris Metro</h1>
+            <p>PDF coordinates from MySQL</p>
+          </div>
+        </div>
+
+        <label class="search">
+          <span>Search</span>
+          <input id="stationSearch" type="search" autocomplete="off" placeholder="Station name">
+        </label>
+
+        <section class="filters" aria-label="Line filters">
+          <div class="filter-head">
+            <span>Lines</span>
+            <button id="clearSelection" type="button" title="Show all lines">All</button>
+          </div>
+          <div id="lineFilters" class="line-filters"></div>
+        </section>
+
+        <section class="details" aria-live="polite">
+          <div id="detailsTitle" class="details-title">Select a station</div>
+          <div id="detailsBody" class="details-body">Click a station dot or line badge to inspect the network.</div>
+        </section>
+      </aside>
+
+      <section class="map-stage">
+        <div class="toolbar">
+          <button id="zoomOut" type="button" title="Zoom out">−</button>
+          <button id="zoomReset" type="button" title="Reset view">⌂</button>
+          <button id="zoomIn" type="button" title="Zoom in">+</button>
+          <span id="stats" class="stats">Loading…</span>
+        </div>
+        <svg id="metroMap" role="img" aria-label="Paris metro map"></svg>
+        <div id="tooltip" class="tooltip" hidden></div>
+      </section>
+    </main>
+
+    <script src="/vendor/d3.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
