@@ -264,32 +264,37 @@ p {
   cursor: pointer;
 }
 
-.station-dot {
+.station-marker {
   fill: #fff;
   stroke: #172033;
   stroke-width: 2.3;
   vector-effect: non-scaling-stroke;
 }
 
+.station-capsule {
+  fill: #fff;
+}
+
 .station.is-muted {
   opacity: 0.18;
 }
 
-.station.is-hit .station-dot,
-.station.is-selected .station-dot {
+.station.is-hit .station-marker,
+.station.is-selected .station-marker {
   fill: #fff2f4;
   stroke: var(--accent);
   stroke-width: 3.5;
 }
 
 .station-label {
-  paint-order: stroke;
-  stroke: rgba(255, 255, 255, 0.92);
-  stroke-width: 4px;
-  fill: #202938;
-  font-size: 18px;
   font-weight: 700;
   pointer-events: none;
+}
+
+.station-label text {
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.94);
+  fill: #202938;
 }
 
 .tooltip {

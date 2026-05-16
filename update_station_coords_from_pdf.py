@@ -146,6 +146,18 @@ TYPE_COLORS = {
     "NAVETTE": "#9333ea",
 }
 
+# A few labels in the PDF are not recoverable as normal words: their letters
+# are split into separate glyph runs, or the database spelling differs from the
+# PDF. These coordinates still come from PDF vector dot clusters.
+PDF_COORD_OVERRIDES = {
+    # ASNIÈRES QUATRE ROUTES: T1 terminal marker.
+    110: (1532.5570, 696.8897),
+    # LES COURTILLES: T1 dot at the interchange capsule.
+    274: (1585.4839, 696.8038),
+    # ASNIÈRES-GENNEVILLIERS - LES COURTILLES: M13 side of the same capsule.
+    321: (1585.4884, 680.9129),
+}
+
 
 def normalize(value: str) -> str:
     value = value.replace("’", "'").replace("`", "'").replace("´", "'")
@@ -212,6 +224,29 @@ def update_matches(matches: Iterable[Match]) -> int:
     try:
         with conn.cursor() as cur:
             cur.executemany("UPDATE stations SET x=%s, y=%s WHERE id=%s", rows)
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def apply_coordinate_overrides() -> int:
+    rows = [(x, y, station_id) for station_id, (x, y) in PDF_COORD_OVERRIDES.items()]
+    if not rows:
+        return 0
+    conn = pymysql.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany("UPDATE stations SET x=%s, y=%s WHERE id=%s", rows)
+            cur.execute(
+                """
+                UPDATE stations
+                SET
+                  name='ASNIÈRES-GENNEVILLIERS - LES COURTILLES',
+                  name2='Asnières-Gennevilliers - Les Courtilles'
+                WHERE id=321
+                """
+            )
         conn.commit()
         return len(rows)
     finally:
@@ -682,8 +717,10 @@ def main() -> int:
 
     if args.apply:
         written = update_matches(matches)
+        overridden = apply_coordinate_overrides()
         print()
         print(f"updated rows={written}")
+        print(f"override rows={overridden}")
     else:
         print()
         print("dry-run only; pass --apply to update MySQL.")

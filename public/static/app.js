@@ -16,13 +16,18 @@ let mapData = null;
 let selectedLineId = null;
 let selectedStationId = null;
 let currentTransform = d3.zoomIdentity;
+let stationLayout = new Map();
+
+const LABEL_SCREEN_SIZE = 13;
+const LABEL_LINE_HEIGHT = 15;
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 const zoom = d3.zoom()
   .scaleExtent([0.18, 9])
   .on("zoom", (event) => {
     currentTransform = event.transform;
     root.attr("transform", currentTransform);
-    updateLabelVisibility();
+    updateScaledSymbols();
   });
 
 svg.call(zoom);
@@ -36,6 +41,26 @@ function lineSet(station) {
   return new Set(station.lines.map((line) => line.id));
 }
 
+function normalizeLabel(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function displayStationName(station) {
+  return stationLayout.get(station.id)?.labelName || station.name;
+}
+
+function stationMatchesQuery(station, query) {
+  if (!query) return false;
+  const normalizedQuery = normalizeLabel(query);
+  return normalizeLabel(station.name).includes(normalizedQuery) ||
+    normalizeLabel(displayStationName(station)).includes(normalizedQuery);
+}
+
 function visibleByLine(d) {
   return !selectedLineId || d.lines?.some((line) => line.id === selectedLineId);
 }
@@ -46,6 +71,164 @@ function routePath(points) {
     .x((d) => d.x)
     .y((d) => d.y)
     .curve(d3.curveLinear)(points);
+}
+
+function hasPoint(value) {
+  return value.x !== null && value.y !== null && Number.isFinite(+value.x) && Number.isFinite(+value.y);
+}
+
+function sortedMembers(line) {
+  return (line.stations || [])
+    .filter(hasPoint)
+    .map((station, index) => ({ ...station, index }))
+    .sort((a, b) => {
+      const ao = numericOrder(a.order, a.index);
+      const bo = numericOrder(b.order, b.index);
+      return ao - bo;
+    });
+}
+
+function numericOrder(value, fallback) {
+  return value !== null && value !== undefined && Number.isFinite(+value) ? +value : fallback;
+}
+
+function linePriority(type) {
+  const normalized = String(type || "").toUpperCase();
+  if (normalized === "METRO") return 0;
+  if (normalized === "RER") return 1;
+  if (normalized === "TRAIN") return 2;
+  return 3;
+}
+
+function chooseDirection(directions, preferredLineId = null) {
+  if (!directions?.length) return null;
+  const preferred = preferredLineId ? directions.find((direction) => direction.lineId === preferredLineId) : null;
+  if (preferred) return preferred;
+  return [...directions].sort((a, b) =>
+    linePriority(a.type) - linePriority(b.type) ||
+    Math.abs(b.dx) - Math.abs(a.dx) ||
+    a.lineId - b.lineId
+  )[0];
+}
+
+function buildStationLayout(data) {
+  const layout = new Map(data.stations.map((station) => [station.id, { directions: [] }]));
+
+  data.lines.forEach((line) => {
+    const members = sortedMembers(line);
+    members.forEach((member, index) => {
+      const previous = members[index - 1];
+      const next = members[index + 1];
+      let dx = 0;
+      let dy = 0;
+      if (previous && next) {
+        dx = +next.x - +previous.x;
+        dy = +next.y - +previous.y;
+      } else if (next) {
+        dx = +next.x - +member.x;
+        dy = +next.y - +member.y;
+      } else if (previous) {
+        dx = +member.x - +previous.x;
+        dy = +member.y - +previous.y;
+      }
+
+      const length = Math.hypot(dx, dy);
+      if (!length || !layout.has(member.stationId)) return;
+      layout.get(member.stationId).directions.push({
+        lineId: line.id,
+        type: line.type,
+        code: line.code,
+        order: numericOrder(member.order, index),
+        index,
+        dx: dx / length,
+        dy: dy / length,
+        angle: Math.atan2(dy, dx) * 180 / Math.PI,
+      });
+    });
+  });
+
+  data.stations.forEach((station) => {
+    const entry = layout.get(station.id) || { directions: [] };
+    const primary = chooseDirection(entry.directions);
+    const nearby = data.stations.filter((other) =>
+      other.id !== station.id && Math.hypot(other.x - station.x, other.y - station.y) <= 22
+    );
+    const nearbyLineIds = new Set(station.lines.map((line) => line.id));
+    nearby.forEach((other) => other.lines.forEach((line) => nearbyLineIds.add(line.id)));
+    const groupedInterchange = nearby.length > 0 && nearbyLineIds.size > (station.lines?.length || 0);
+    const closest = nearby.sort((a, b) =>
+      Math.hypot(a.x - station.x, a.y - station.y) - Math.hypot(b.x - station.x, b.y - station.y)
+    )[0];
+    const groupAngle = closest ? Math.atan2(closest.y - station.y, closest.x - station.x) * 180 / Math.PI : null;
+    const stationNorm = normalizeLabel(station.name);
+    const fullerName = nearby
+      .map((other) => other.name)
+      .filter((name) => normalizeLabel(name).includes(stationNorm) && name.length > station.name.length)
+      .sort((a, b) => b.length - a.length)[0];
+    entry.primary = primary;
+    entry.labelName = fullerName || station.name;
+    entry.marker = markerForStation(station, primary, groupedInterchange, groupAngle);
+    layout.set(station.id, entry);
+  });
+
+  return layout;
+}
+
+function markerForStation(station, direction, groupedInterchange = false, groupAngle = null) {
+  const lineCount = station.lines?.length || 0;
+  if (lineCount > 1 || groupedInterchange) {
+    return {
+      shape: "capsule",
+      angle: groupAngle ?? direction?.angle ?? 0,
+      width: Math.min(38, 26 + Math.max(lineCount, 2) * 4),
+      height: 13,
+    };
+  }
+  return {
+    shape: "circle",
+    radius: 4.6,
+  };
+}
+
+function labelLines(name) {
+  if (!name) return [""];
+  const normalized = String(name).replace(/\s+/g, " ").trim();
+  if (/^Asnières Quatre Routes$/i.test(normalized)) return ["Asnières", "Quatre Routes"];
+  if (normalized.length <= 18) return [normalized];
+  if (normalized.includes(" - ")) {
+    const parts = normalized.split(" - ");
+    return [parts[0], parts.slice(1).join(" - ")].filter(Boolean);
+  }
+  const words = normalized.split(" ");
+  const lines = [];
+  let current = "";
+  words.forEach((word) => {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length > 18 && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  });
+  if (current) lines.push(current);
+  return lines.slice(0, 3);
+}
+
+function labelPlacement(station) {
+  const entry = stationLayout.get(station.id);
+  const direction = chooseDirection(entry?.directions, selectedLineId);
+  if (!direction) return { dx: 15, dy: -18, anchor: "start", block: "side" };
+
+  const horizontal = Math.abs(direction.dx) >= Math.abs(direction.dy);
+  const order = Number.isFinite(direction.order) ? direction.order : station.id;
+  if (horizontal) {
+    const below = order % 5 === 3;
+    return { dx: 0, dy: below ? 14 : -14, anchor: "middle", block: below ? "below" : "above" };
+  }
+
+  const right = order % 2 === 0;
+  return { dx: right ? 15 : -15, dy: -8, anchor: right ? "start" : "end", block: "side" };
 }
 
 function drawGrid(width, height) {
@@ -72,6 +255,7 @@ function drawGrid(width, height) {
 
 function render(data) {
   mapData = data;
+  stationLayout = buildStationLayout(data);
   root.insert("rect", ":first-child")
     .attr("class", "map-bg")
     .attr("x", 0)
@@ -112,17 +296,29 @@ function render(data) {
       showStationDetails(d);
     });
 
-  stations.append("circle")
-    .attr("class", "station-dot")
-    .attr("r", (d) => Math.max(5, Math.min(11, 4 + d.lines.length * 1.4)));
+  stations.selectAll(".station-marker").remove();
+  stations.each(function (d) {
+    const marker = stationLayout.get(d.id)?.marker || markerForStation(d, null);
+    const node = document.createElementNS(SVG_NS, marker.shape === "capsule" ? "rect" : "circle");
+    d3.select(this).append(() => node)
+      .attr("class", `station-marker station-${marker.shape}`);
+  });
 
-  labelLayer.selectAll("text")
+  const labels = labelLayer.selectAll("g.station-label")
     .data(data.stations, (d) => d.id)
-    .join("text")
-    .attr("class", "station-label")
-    .attr("x", (d) => d.x + 12)
-    .attr("y", (d) => d.y - 12)
-    .text((d) => d.name);
+    .join("g")
+    .attr("class", "station-label");
+
+  labels.each(function (d) {
+    const text = d3.select(this)
+      .selectAll("text")
+      .data([d])
+      .join("text");
+    text.selectAll("tspan")
+      .data(labelLines(displayStationName(d)))
+      .join("tspan")
+      .text((line) => line);
+  });
 
   lineFilters.selectAll("button")
     .data(data.lines.filter((line) => line.points.length > 1), (d) => d.id)
@@ -164,16 +360,16 @@ function updateSelection() {
   stationLayer.selectAll(".station")
     .classed("is-muted", (d) => {
       if (selectedLineId && !visibleByLine(d)) return true;
-      if (query && !d.name.toLocaleLowerCase().includes(query)) return true;
+      if (query && !stationMatchesQuery(d, query)) return true;
       return false;
     })
-    .classed("is-hit", (d) => query && d.name.toLocaleLowerCase().includes(query))
+    .classed("is-hit", (d) => query && stationMatchesQuery(d, query))
     .classed("is-selected", (d) => selectedStationId === d.id);
 
-  labelLayer.selectAll("text")
+  labelLayer.selectAll("g.station-label")
     .classed("is-muted", (d) => {
       if (selectedLineId && !visibleByLine(d)) return true;
-      if (query && !d.name.toLocaleLowerCase().includes(query)) return true;
+      if (query && !stationMatchesQuery(d, query)) return true;
       return false;
     });
 
@@ -188,14 +384,103 @@ function updateSelection() {
 function updateLabelVisibility() {
   const scale = currentTransform.k;
   const query = searchInput.value.trim().toLocaleLowerCase();
-  labelLayer.selectAll("text")
+  labelLayer.selectAll("g.station-label")
     .attr("display", (d) => {
       const selected = selectedStationId === d.id;
-      const hit = query && d.name.toLocaleLowerCase().includes(query);
+      const hit = query && stationMatchesQuery(d, query);
       const onLine = selectedLineId && visibleByLine(d);
-      return scale > 1.15 || selected || hit || onLine ? null : "none";
-    })
-    .attr("font-size", Math.max(10, 18 / Math.sqrt(scale)));
+      return scale > 2.05 || selected || hit || onLine ? null : "none";
+    });
+  updateLabelGeometry();
+  requestAnimationFrame(resolveLabelCollisions);
+}
+
+function updateLabelGeometry() {
+  const scale = Math.max(currentTransform.k || 1, 0.001);
+  labelLayer.selectAll("g.station-label")
+    .each(function (d) {
+      const placement = labelPlacement(d);
+      const lines = labelLines(displayStationName(d));
+      const fontSize = LABEL_SCREEN_SIZE / scale;
+      const lineHeight = LABEL_LINE_HEIGHT / scale;
+      let x = d.x + placement.dx / scale;
+      let y = d.y + placement.dy / scale;
+      if (placement.block === "above") y -= (lines.length * LABEL_LINE_HEIGHT) / scale;
+      if (placement.block === "side") y -= ((lines.length - 1) * LABEL_LINE_HEIGHT * 0.5) / scale;
+
+      const text = d3.select(this).select("text")
+        .attr("text-anchor", placement.anchor)
+        .style("font-size", `${fontSize}px`)
+        .style("stroke-width", `${3.2 / scale}px`);
+
+      text.selectAll("tspan")
+        .attr("x", x)
+        .attr("y", (_, index) => y + index * lineHeight);
+    });
+}
+
+function labelPriority(d) {
+  const query = searchInput.value.trim().toLocaleLowerCase();
+  if (selectedStationId === d.id) return 4;
+  if (query && stationMatchesQuery(d, query)) return 3;
+  if (selectedLineId && visibleByLine(d)) return 2;
+  return 1;
+}
+
+function boxesOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function resolveLabelCollisions() {
+  const nodes = labelLayer.selectAll("g.station-label").nodes()
+    .filter((node) => d3.select(node).attr("display") !== "none")
+    .map((node) => ({ node, datum: d3.select(node).datum(), box: node.getBoundingClientRect() }))
+    .sort((a, b) => labelPriority(b.datum) - labelPriority(a.datum) || a.box.top - b.box.top || a.box.left - b.box.left);
+
+  const accepted = [];
+  nodes.forEach((item) => {
+    const priority = labelPriority(item.datum);
+    const padded = {
+      left: item.box.left - 2,
+      right: item.box.right + 2,
+      top: item.box.top - 2,
+      bottom: item.box.bottom + 2,
+    };
+    const collides = accepted.some((box) => boxesOverlap(padded, box));
+    if (collides && priority < 4) {
+      d3.select(item.node).attr("display", "none");
+    } else {
+      accepted.push(padded);
+    }
+  });
+}
+
+function updateScaledSymbols() {
+  const scale = Math.max(currentTransform.k || 1, 0.001);
+  const markerScale = 1 / Math.max(1, Math.sqrt(scale));
+
+  stationLayer.selectAll(".station-circle")
+    .attr("r", (d) => {
+      const marker = stationLayout.get(d.id)?.marker || markerForStation(d, null);
+      return (marker.radius || 4.6) * markerScale;
+    });
+
+  stationLayer.selectAll(".station-capsule")
+    .each(function (d) {
+      const marker = stationLayout.get(d.id)?.marker || markerForStation(d, null);
+      const width = marker.width * markerScale;
+      const height = marker.height * markerScale;
+      d3.select(this)
+        .attr("x", -width / 2)
+        .attr("y", -height / 2)
+        .attr("width", width)
+        .attr("height", height)
+        .attr("rx", height / 2)
+        .attr("ry", height / 2)
+        .attr("transform", `rotate(${marker.angle || 0})`);
+    });
+
+  updateLabelVisibility();
 }
 
 function showTooltip(event, station) {
@@ -204,11 +489,11 @@ function showTooltip(event, station) {
     .attr("hidden", null)
     .style("left", `${event.clientX + 14}px`)
     .style("top", `${event.clientY + 14}px`)
-    .html(`<strong>${station.name}</strong><br><span>${lines}</span><br><span>x ${station.x.toFixed(1)}, y ${station.y.toFixed(1)}</span>`);
+    .html(`<strong>${displayStationName(station)}</strong><br><span>${lines}</span><br><span>x ${station.x.toFixed(1)}, y ${station.y.toFixed(1)}</span>`);
 }
 
 function showStationDetails(station) {
-  detailsTitle.text(station.name);
+  detailsTitle.text(displayStationName(station));
   const linePills = station.lines.map((line) =>
     `<span class="line-pill" style="background:${line.color}">${lineLabel(line)}</span>`
   ).join("");
