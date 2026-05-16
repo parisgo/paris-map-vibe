@@ -11,12 +11,15 @@ const tooltip = d3.select("#tooltip");
 const detailsTitle = d3.select("#detailsTitle");
 const detailsBody = d3.select("#detailsBody");
 const searchInput = document.querySelector("#stationSearch");
+const stationSuggestions = document.querySelector("#stationSuggestions");
 
 let mapData = null;
 let selectedLineId = null;
 let selectedStationId = null;
 let currentTransform = d3.zoomIdentity;
 let stationLayout = new Map();
+let suggestionStations = [];
+let activeSuggestionIndex = -1;
 
 const LABEL_SCREEN_SIZE = 13;
 const LABEL_LINE_HEIGHT = 15;
@@ -40,12 +43,65 @@ function lineLabel(line) {
   return `${prefix}${line.code}`;
 }
 
+function normalizedLineType(line) {
+  const type = String(line.type || "").toUpperCase();
+  return type === "TRAMWAY" ? "TRAM" : type;
+}
+
+function lineTypeRank(line) {
+  const type = normalizedLineType(line);
+  if (type === "METRO") return 0;
+  if (type === "RER") return 1;
+  if (type === "TRAIN") return 2;
+  if (type === "TRAM") return 3;
+  if (type === "NAVETTE") return 4;
+  return 5;
+}
+
+function lineCodeParts(code) {
+  const value = String(code || "");
+  const match = value.match(/^([A-Za-z]*)(\d+)([A-Za-z]*)$/);
+  if (!match) return { prefix: value, number: Number.POSITIVE_INFINITY, suffix: "" };
+  return {
+    prefix: match[1].toLocaleUpperCase(),
+    number: Number(match[2]),
+    suffix: match[3].toLocaleLowerCase(),
+  };
+}
+
+function compareLines(a, b) {
+  const typeDiff = lineTypeRank(a) - lineTypeRank(b);
+  if (typeDiff) return typeDiff;
+  const ac = lineCodeParts(a.code);
+  const bc = lineCodeParts(b.code);
+  return ac.prefix.localeCompare(bc.prefix) ||
+    ac.number - bc.number ||
+    ac.suffix.localeCompare(bc.suffix) ||
+    String(a.code).localeCompare(String(b.code));
+}
+
+function groupedDrawableLines(lines) {
+  const groups = new Map();
+  lines
+    .filter((line) => routeSegments(line).length)
+    .sort(compareLines)
+    .forEach((line) => {
+      const type = normalizedLineType(line);
+      if (!groups.has(type)) groups.set(type, []);
+      groups.get(type).push(line);
+    });
+  return Array.from(groups, ([type, groupLines]) => ({ type, lines: groupLines }));
+}
+
 function lineSet(station) {
   return new Set(station.lines.map((line) => line.id));
 }
 
 function normalizeLabel(value) {
   return String(value || "")
+    .replace(/[œŒ]/g, "oe")
+    .replace(/[æÆ]/g, "ae")
+    .replace(/[’'`´]/g, " ")
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "")
     .toLocaleLowerCase()
@@ -57,11 +113,29 @@ function displayStationName(station) {
   return stationLayout.get(station.id)?.labelName || station.name;
 }
 
+function stationSearchText(station) {
+  const names = [...new Set([station.name, station.rawName, displayStationName(station)]
+    .filter(Boolean)
+    .map((name) => String(name).trim())
+    .filter(Boolean))].join(" ");
+  const normalized = normalizeLabel(names);
+  const saintExpanded = normalized.replace(/\bst\b/g, "saint").replace(/\bste\b/g, "sainte");
+  const saintShort = normalized.replace(/\bsaint\b/g, "st").replace(/\bsainte\b/g, "ste");
+  return `${normalized} ${saintExpanded} ${saintShort}`;
+}
+
+function fuzzyIncludes(text, query) {
+  if (!query) return false;
+  if (text.includes(query)) return true;
+  const tokens = query.split(" ").filter(Boolean);
+  if (tokens.length > 1 && tokens.every((token) => text.includes(token))) return true;
+  return false;
+}
+
 function stationMatchesQuery(station, query) {
   if (!query) return false;
   const normalizedQuery = normalizeLabel(query);
-  return normalizeLabel(station.name).includes(normalizedQuery) ||
-    normalizeLabel(displayStationName(station)).includes(normalizedQuery);
+  return fuzzyIncludes(stationSearchText(station), normalizedQuery);
 }
 
 function visibleByLine(d) {
@@ -357,6 +431,94 @@ function labelLines(name) {
   return lines.slice(0, 3);
 }
 
+function matchingStations(query) {
+  const normalizedQuery = normalizeLabel(query);
+  if (!normalizedQuery || !mapData) return [];
+  return mapData.stations
+    .map((station) => {
+      const text = stationSearchText(station);
+      if (!fuzzyIncludes(text, normalizedQuery)) return null;
+      const name = normalizeLabel(displayStationName(station));
+      const raw = normalizeLabel(station.rawName);
+      const index = Math.min(
+        ...[name.indexOf(normalizedQuery), raw.indexOf(normalizedQuery), text.indexOf(normalizedQuery)]
+          .filter((value) => value >= 0)
+      );
+      const position = Number.isFinite(index) ? index : 99;
+      const starts = name.startsWith(normalizedQuery) || raw.startsWith(normalizedQuery) ? 0 : 1;
+      return { station, starts, position, length: displayStationName(station).length };
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      a.starts - b.starts ||
+      a.position - b.position ||
+      a.length - b.length ||
+      displayStationName(a.station).localeCompare(displayStationName(b.station))
+    )
+    .slice(0, 10)
+    .map((item) => item.station);
+}
+
+function renderStationSuggestions() {
+  const query = searchInput.value.trim();
+  suggestionStations = matchingStations(query);
+  activeSuggestionIndex = suggestionStations.length ? 0 : -1;
+  stationSuggestions.replaceChildren();
+  if (!suggestionStations.length) {
+    stationSuggestions.hidden = true;
+    return;
+  }
+
+  suggestionStations.forEach((station, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `suggestion-item${index === activeSuggestionIndex ? " is-active" : ""}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", index === activeSuggestionIndex ? "true" : "false");
+
+    const name = document.createElement("span");
+    name.className = "suggestion-name";
+    name.textContent = displayStationName(station);
+    button.appendChild(name);
+
+    const lines = document.createElement("span");
+    lines.className = "suggestion-lines";
+    lines.textContent = [...station.lines].sort(compareLines).map((line) => lineLabel(line)).join(" · ");
+    button.appendChild(lines);
+
+    button.addEventListener("mouseenter", () => setActiveSuggestion(index));
+    button.addEventListener("click", () => selectStationSuggestion(station));
+    stationSuggestions.appendChild(button);
+  });
+  stationSuggestions.hidden = false;
+}
+
+function setActiveSuggestion(index) {
+  if (!suggestionStations.length) return;
+  activeSuggestionIndex = (index + suggestionStations.length) % suggestionStations.length;
+  Array.from(stationSuggestions.querySelectorAll(".suggestion-item")).forEach((button, itemIndex) => {
+    const active = itemIndex === activeSuggestionIndex;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+function hideStationSuggestions() {
+  suggestionStations = [];
+  activeSuggestionIndex = -1;
+  stationSuggestions.hidden = true;
+  stationSuggestions.replaceChildren();
+}
+
+function selectStationSuggestion(station) {
+  selectedStationId = station.id;
+  selectedLineId = null;
+  searchInput.value = displayStationName(station);
+  hideStationSuggestions();
+  updateSelection();
+  showStationDetails(station);
+}
+
 function labelPlacement(station) {
   const entry = stationLayout.get(station.id);
   const direction = selectedLineDirection(station) || chooseDirection(entry?.directions, selectedLineId);
@@ -476,8 +638,13 @@ function render(data) {
       .text((line) => line);
   });
 
-  lineFilters.selectAll("button")
-    .data(data.lines.filter((line) => routeSegments(line).length), (d) => d.id)
+  const filterGroups = lineFilters.selectAll("div.line-filter-group")
+    .data(groupedDrawableLines(data.lines), (d) => d.type)
+    .join("div")
+    .attr("class", "line-filter-group");
+
+  filterGroups.selectAll("button")
+    .data((d) => d.lines, (d) => d.id)
     .join("button")
     .attr("class", "line-button")
     .style("border-color", (d) => d.color)
@@ -488,6 +655,7 @@ function render(data) {
     .on("click", (event, d) => {
       selectedLineId = selectedLineId === d.id ? null : d.id;
       selectedStationId = null;
+      hideStationSuggestions();
       updateSelection();
       if (selectedLineId) showLineDetails(d);
       else resetDetails();
@@ -497,6 +665,7 @@ function render(data) {
     selectedLineId = null;
     selectedStationId = null;
     searchInput.value = "";
+    hideStationSuggestions();
     updateSelection();
     resetDetails();
   });
@@ -757,11 +926,46 @@ document.querySelector("#clearSelection").addEventListener("click", () => {
   selectedLineId = null;
   selectedStationId = null;
   searchInput.value = "";
+  hideStationSuggestions();
   updateSelection();
   resetDetails();
 });
 
-searchInput.addEventListener("input", updateSelection);
+searchInput.addEventListener("input", () => {
+  selectedStationId = null;
+  renderStationSuggestions();
+  updateSelection();
+});
+
+searchInput.addEventListener("focus", renderStationSuggestions);
+
+searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    hideStationSuggestions();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setActiveSuggestion(activeSuggestionIndex + 1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    setActiveSuggestion(activeSuggestionIndex - 1);
+    return;
+  }
+  if (event.key === "Enter" && suggestionStations.length) {
+    event.preventDefault();
+    const station = suggestionStations[Math.max(activeSuggestionIndex, 0)];
+    if (station) selectStationSuggestion(station);
+  }
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (event.target === searchInput || stationSuggestions.contains(event.target)) return;
+  hideStationSuggestions();
+});
+
 window.addEventListener("resize", () => window.requestAnimationFrame(resetZoom));
 
 fetch("/api/map")

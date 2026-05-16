@@ -73,6 +73,7 @@ p {
 }
 
 .search {
+  position: relative;
   display: grid;
   gap: 8px;
   color: var(--muted);
@@ -94,6 +95,56 @@ p {
 .search input:focus {
   border-color: #697388;
   box-shadow: 0 0 0 3px rgba(105, 115, 136, 0.12);
+}
+
+.station-suggestions {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 36px rgba(24, 32, 47, 0.14);
+}
+
+.suggestion-item {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.suggestion-item:hover,
+.suggestion-item.is-active {
+  background: #eef1f6;
+}
+
+.suggestion-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-transform: none;
+}
+
+.suggestion-lines {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: none;
 }
 
 .filters {
@@ -131,12 +182,17 @@ p {
 }
 
 .line-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  gap: 10px;
   max-height: 38vh;
   overflow: auto;
   padding-right: 2px;
+}
+
+.line-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .line-button {
