@@ -20,6 +20,9 @@ let stationLayout = new Map();
 
 const LABEL_SCREEN_SIZE = 13;
 const LABEL_LINE_HEIGHT = 15;
+const LABEL_ROUTE_GAP = 8;
+const LABEL_TEXT_DESCENT = 3;
+const LABEL_STACK_GAP = 6;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const zoom = d3.zoom()
@@ -73,6 +76,32 @@ function routePath(points) {
     .curve(d3.curveLinear)(points);
 }
 
+function routeStrokeWidth(line) {
+  return line?.type === "RER" || line?.type === "TRAIN" ? 8 : 6;
+}
+
+function routeHalfWidthScreen(station) {
+  const scale = Math.max(currentTransform.k || 1, 0.001);
+  let line = null;
+  if (selectedLineId && visibleByLine(station)) {
+    line = mapData?.lines.find((item) => item.id === selectedLineId);
+  }
+  if (!line) {
+    const hasHeavyLine = station.lines?.some((item) => item.type === "RER" || item.type === "TRAIN");
+    line = { type: hasHeavyLine ? "RER" : "METRO" };
+  }
+  return routeStrokeWidth(line) * scale / 2;
+}
+
+function aboveLabelOffset(station) {
+  return routeHalfWidthScreen(station) + LABEL_ROUTE_GAP + LABEL_TEXT_DESCENT;
+}
+
+function belowLabelOffset(station, row = 0) {
+  return routeHalfWidthScreen(station) + LABEL_ROUTE_GAP + LABEL_SCREEN_SIZE +
+    row * (LABEL_LINE_HEIGHT + LABEL_STACK_GAP);
+}
+
 function hasPoint(value) {
   return value.x !== null && value.y !== null && Number.isFinite(+value.x) && Number.isFinite(+value.y);
 }
@@ -109,6 +138,95 @@ function chooseDirection(directions, preferredLineId = null) {
     Math.abs(b.dx) - Math.abs(a.dx) ||
     a.lineId - b.lineId
   )[0];
+}
+
+function selectedLineDirection(station) {
+  if (!selectedLineId || !mapData) return null;
+  const line = mapData.lines.find((item) => item.id === selectedLineId);
+  if (!line) return null;
+  const pathDirection = directionFromRoutePath(line, station);
+  if (pathDirection) return pathDirection;
+
+  const members = sortedMembers(line);
+  let index = members.findIndex((member) => member.stationId === station.id);
+  if (index < 0) {
+    index = members.findIndex((member) => Math.hypot(+member.x - station.x, +member.y - station.y) <= 3);
+  }
+  if (index < 0) return null;
+
+  const member = members[index];
+  const previous = members[index - 1];
+  const next = members[index + 1];
+  let dx = 0;
+  let dy = 0;
+  if (previous && next) {
+    dx = +next.x - +previous.x;
+    dy = +next.y - +previous.y;
+  } else if (next) {
+    dx = +next.x - +member.x;
+    dy = +next.y - +member.y;
+  } else if (previous) {
+    dx = +member.x - +previous.x;
+    dy = +member.y - +previous.y;
+  }
+
+  const length = Math.hypot(dx, dy);
+  if (!length) return null;
+  return {
+    lineId: line.id,
+    type: line.type,
+    code: line.code,
+    order: numericOrder(member.order, index),
+    index,
+    dx: dx / length,
+    dy: dy / length,
+    angle: Math.atan2(dy, dx) * 180 / Math.PI,
+  };
+}
+
+function directionFromRoutePath(line, station) {
+  const points = line.points || [];
+  if (points.length < 2) return null;
+
+  let closestIndex = -1;
+  let closestDistance = Infinity;
+  points.forEach((point, index) => {
+    const distance = Math.hypot(+point.x - station.x, +point.y - station.y);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestIndex = index;
+    }
+  });
+  if (closestIndex < 0 || closestDistance > 55) return null;
+
+  const previous = points[closestIndex - 1];
+  const next = points[closestIndex + 1];
+  const point = points[closestIndex];
+  let dx = 0;
+  let dy = 0;
+  if (previous && next) {
+    dx = +next.x - +previous.x;
+    dy = +next.y - +previous.y;
+  } else if (next) {
+    dx = +next.x - +point.x;
+    dy = +next.y - +point.y;
+  } else if (previous) {
+    dx = +point.x - +previous.x;
+    dy = +point.y - +previous.y;
+  }
+
+  const length = Math.hypot(dx, dy);
+  if (!length) return null;
+  return {
+    lineId: line.id,
+    type: line.type,
+    code: line.code,
+    order: closestIndex,
+    index: closestIndex,
+    dx: dx / length,
+    dy: dy / length,
+    angle: Math.atan2(dy, dx) * 180 / Math.PI,
+  };
 }
 
 function buildStationLayout(data) {
@@ -217,18 +335,32 @@ function labelLines(name) {
 
 function labelPlacement(station) {
   const entry = stationLayout.get(station.id);
-  const direction = chooseDirection(entry?.directions, selectedLineId);
+  const direction = selectedLineDirection(station) || chooseDirection(entry?.directions, selectedLineId);
   if (!direction) return { dx: 15, dy: -18, anchor: "start", block: "side" };
 
   const horizontal = Math.abs(direction.dx) >= Math.abs(direction.dy);
-  const order = Number.isFinite(direction.order) ? direction.order : station.id;
   if (horizontal) {
-    const below = order % 5 === 3;
-    return { dx: 0, dy: below ? 14 : -14, anchor: "middle", block: below ? "below" : "above" };
+    return {
+      dx: 0,
+      dy: null,
+      anchor: "middle",
+      block: "above",
+    };
   }
 
+  const order = Number.isFinite(direction.order) ? direction.order : station.id;
   const right = order % 2 === 0;
   return { dx: right ? 15 : -15, dy: -8, anchor: right ? "start" : "end", block: "side" };
+}
+
+function belowLinePlacement(row = 0) {
+  return {
+    dx: 0,
+    dy: null,
+    anchor: "middle",
+    block: "below",
+    row,
+  };
 }
 
 function drawGrid(width, height) {
@@ -271,7 +403,7 @@ function render(data) {
     .attr("class", "route-line")
     .attr("d", (d) => routePath(d.points))
     .attr("stroke", (d) => d.color)
-    .attr("stroke-width", (d) => d.type === "RER" || d.type === "TRAIN" ? 8 : 6)
+    .attr("stroke-width", (d) => routeStrokeWidth(d))
     .on("click", (event, d) => {
       event.stopPropagation();
       selectedLineId = selectedLineId === d.id ? null : d.id;
@@ -396,27 +528,37 @@ function updateLabelVisibility() {
 }
 
 function updateLabelGeometry() {
-  const scale = Math.max(currentTransform.k || 1, 0.001);
   labelLayer.selectAll("g.station-label")
     .each(function (d) {
-      const placement = labelPlacement(d);
-      const lines = labelLines(displayStationName(d));
-      const fontSize = LABEL_SCREEN_SIZE / scale;
-      const lineHeight = LABEL_LINE_HEIGHT / scale;
-      let x = d.x + placement.dx / scale;
-      let y = d.y + placement.dy / scale;
-      if (placement.block === "above") y -= (lines.length * LABEL_LINE_HEIGHT) / scale;
-      if (placement.block === "side") y -= ((lines.length - 1) * LABEL_LINE_HEIGHT * 0.5) / scale;
-
-      const text = d3.select(this).select("text")
-        .attr("text-anchor", placement.anchor)
-        .style("font-size", `${fontSize}px`)
-        .style("stroke-width", `${3.2 / scale}px`);
-
-      text.selectAll("tspan")
-        .attr("x", x)
-        .attr("y", (_, index) => y + index * lineHeight);
+      applyLabelPlacement(this, d, labelPlacement(d));
     });
+}
+
+function applyLabelPlacement(node, station, placement) {
+  const scale = Math.max(currentTransform.k || 1, 0.001);
+  const lines = labelLines(displayStationName(station));
+  const fontSize = LABEL_SCREEN_SIZE / scale;
+  const lineHeight = LABEL_LINE_HEIGHT / scale;
+  const dy = placement.dy ?? (
+    placement.block === "above" ? -aboveLabelOffset(station) :
+    placement.block === "below" ? belowLabelOffset(station, placement.row || 0) :
+    0
+  );
+  let x = station.x + placement.dx / scale;
+  let y = station.y + dy / scale;
+  if (placement.block === "above") y -= ((lines.length - 1) * LABEL_LINE_HEIGHT) / scale;
+  if (placement.block === "side") y -= ((lines.length - 1) * LABEL_LINE_HEIGHT * 0.5) / scale;
+
+  const text = d3.select(node).select("text")
+    .attr("text-anchor", placement.anchor)
+    .style("font-size", `${fontSize}px`)
+    .style("stroke-width", `${3.2 / scale}px`);
+
+  text.selectAll("tspan")
+    .attr("x", x)
+    .attr("y", (_, index) => y + index * lineHeight);
+
+  d3.select(node).attr("data-placement", placement.block);
 }
 
 function labelPriority(d) {
@@ -434,25 +576,74 @@ function boxesOverlap(a, b) {
 function resolveLabelCollisions() {
   const nodes = labelLayer.selectAll("g.station-label").nodes()
     .filter((node) => d3.select(node).attr("display") !== "none")
-    .map((node) => ({ node, datum: d3.select(node).datum(), box: node.getBoundingClientRect() }))
+    .map((node) => {
+      const datum = d3.select(node).datum();
+      return {
+        node,
+        datum,
+        box: node.getBoundingClientRect(),
+        placement: d3.select(node).attr("data-placement"),
+      };
+    })
     .sort((a, b) => labelPriority(b.datum) - labelPriority(a.datum) || a.box.top - b.box.top || a.box.left - b.box.left);
 
   const accepted = [];
   nodes.forEach((item) => {
     const priority = labelPriority(item.datum);
-    const padded = {
-      left: item.box.left - 2,
-      right: item.box.right + 2,
-      top: item.box.top - 2,
-      bottom: item.box.bottom + 2,
-    };
-    const collides = accepted.some((box) => boxesOverlap(padded, box));
-    if (collides && priority < 4) {
+    let padded = paddedBox(item.box);
+    if (item.placement !== "below" && overlapsRouteBand(padded, item.datum)) {
+      applyLabelPlacement(item.node, item.datum, belowLinePlacement());
+      item.box = item.node.getBoundingClientRect();
+      item.placement = "below";
+      padded = paddedBox(item.box);
+    }
+    let collides = accepted.some((box) => boxesOverlap(padded, box));
+    if (collides && item.placement !== "below") {
+      applyLabelPlacement(item.node, item.datum, belowLinePlacement());
+      item.box = item.node.getBoundingClientRect();
+      item.placement = "below";
+      padded = paddedBox(item.box);
+      collides = accepted.some((box) => boxesOverlap(padded, box)) ||
+        overlapsRouteBand(padded, item.datum);
+    }
+    if (collides && item.placement === "below") {
+      applyLabelPlacement(item.node, item.datum, belowLinePlacement(1));
+      item.box = item.node.getBoundingClientRect();
+      item.placement = "below";
+      padded = paddedBox(item.box);
+      collides = accepted.some((box) => boxesOverlap(padded, box)) ||
+        overlapsRouteBand(padded, item.datum);
+    }
+    if (collides && priority < 3) {
       d3.select(item.node).attr("display", "none");
     } else {
       accepted.push(padded);
     }
   });
+}
+
+function paddedBox(box) {
+  return {
+    left: box.left - 2,
+    right: box.right + 2,
+    top: box.top - 2,
+    bottom: box.bottom + 2,
+  };
+}
+
+function overlapsRouteBand(box, station) {
+  const scale = Math.max(currentTransform.k || 1, 0.001);
+  const svgBox = svg.node().getBoundingClientRect();
+  const stationX = svgBox.left + currentTransform.x + station.x * scale;
+  const stationY = svgBox.top + currentTransform.y + station.y * scale;
+  const localBand = routeHalfWidthScreen(station) + 1;
+  const stationBand = {
+    left: stationX - 34 * scale,
+    right: stationX + 34 * scale,
+    top: stationY - localBand,
+    bottom: stationY + localBand,
+  };
+  return boxesOverlap(box, stationBand);
 }
 
 function updateScaledSymbols() {
