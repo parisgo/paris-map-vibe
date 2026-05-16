@@ -88,6 +88,57 @@ def line_color(line_type: str, code: str, color: str | None) -> str:
     return LINE_COLORS.get(key, TYPE_COLORS.get(line_type.upper(), "#475569"))
 
 
+def order_line_members(members: list[dict]) -> tuple[list[dict], bool]:
+    has_station_order = any(member["order"] is not None for member in members)
+    if not has_station_order:
+        return members, False
+    return sorted(
+        members,
+        key=lambda member: (
+            member["order"] is None,
+            member["order"] if member["order"] is not None else 0,
+            member["stationId"],
+        ),
+    ), True
+
+
+def json_point(value) -> dict | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        x = float(value[0])
+        y = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None
+    return {"x": x, "y": y}
+
+
+def parse_path_segments(path_json: str | None) -> tuple[list[list[dict]], bool]:
+    if not path_json:
+        return [], False
+    try:
+        raw = json.loads(path_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return [], False
+    if not isinstance(raw, list):
+        return [], False
+
+    single = [point for point in (json_point(item) for item in raw) if point]
+    if len(single) == len(raw) and len(single) >= 2:
+        return [single], False
+
+    segments = []
+    for segment in raw:
+        if not isinstance(segment, list):
+            continue
+        points = [point for point in (json_point(item) for item in segment) if point]
+        if len(points) >= 2:
+            segments.append(points)
+    return segments, bool(segments)
+
+
 def dedupe_points(points: list[dict]) -> list[dict]:
     unique: list[dict] = []
     for point in points:
@@ -194,22 +245,26 @@ def fetch_map_data() -> dict:
 
     lines = []
     for line in raw_lines:
+        ordered_members, points_are_ordered = order_line_members(line_members.get(int(line["id"]), []))
         member_points = [
             {"x": float(member["x"]), "y": float(member["y"])}
-            for member in line_members.get(int(line["id"]), [])
+            for member in ordered_members
             if member["x"] is not None and member["y"] is not None
         ]
+        path_segments, path_is_segmented = parse_path_segments(line["path_json"])
         points = member_points
-        if len(points) < 2 and line["path_json"]:
-            try:
-                points = [
-                    {"x": float(point[0]), "y": float(point[1])}
-                    for point in json.loads(line["path_json"])
-                    if len(point) >= 2 and point[0] is not None and point[1] is not None
-                ]
-            except (TypeError, ValueError, json.JSONDecodeError):
-                points = []
-        points = spatially_order_points(points)
+        segments = [member_points] if len(member_points) >= 2 else []
+        if path_is_segmented:
+            segments = path_segments
+            points = [point for segment in segments for point in segment]
+            points_are_ordered = True
+        elif len(points) < 2 and path_segments:
+            points = path_segments[0]
+            segments = path_segments
+            points_are_ordered = True
+        if not points_are_ordered:
+            points = spatially_order_points(points)
+            segments = [points] if len(points) >= 2 else []
         lines.append(
             {
                 "id": int(line["id"]),
@@ -219,7 +274,8 @@ def fetch_map_data() -> dict:
                 "color": line_color(line["type"], line["code"], line["color"]),
                 "textColor": line["text_color"] or "#111827",
                 "points": points,
-                "stations": line_members.get(int(line["id"]), []),
+                "segments": segments,
+                "stations": ordered_members,
             }
         )
 
@@ -240,7 +296,7 @@ def fetch_map_data() -> dict:
         "stats": {
             "stationCount": len(stations),
             "lineCount": len(lines),
-            "pathLineCount": sum(1 for line in lines if len(line["points"]) >= 2),
+            "pathLineCount": sum(1 for line in lines if line["segments"]),
         },
     }
 

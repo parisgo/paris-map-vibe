@@ -76,6 +76,23 @@ function routePath(points) {
     .curve(d3.curveLinear)(points);
 }
 
+function routeSegments(line) {
+  const segments = (line.segments || [])
+    .filter((segment) => segment && segment.length > 1);
+  if (segments.length) return segments;
+  return line.points?.length > 1 ? [line.points] : [];
+}
+
+function drawableRouteSegments(lines) {
+  return lines.flatMap((line) =>
+    routeSegments(line).map((points, segmentIndex) => ({
+      ...line,
+      points,
+      segmentIndex,
+    }))
+  );
+}
+
 function routeStrokeWidth(line) {
   return line?.type === "RER" || line?.type === "TRAIN" ? 8 : 6;
 }
@@ -185,23 +202,23 @@ function selectedLineDirection(station) {
 }
 
 function directionFromRoutePath(line, station) {
-  const points = line.points || [];
-  if (points.length < 2) return null;
+  const segments = routeSegments(line);
+  if (!segments.length) return null;
 
-  let closestIndex = -1;
-  let closestDistance = Infinity;
-  points.forEach((point, index) => {
-    const distance = Math.hypot(+point.x - station.x, +point.y - station.y);
-    if (distance < closestDistance) {
-      closestDistance = distance;
-      closestIndex = index;
-    }
+  let closest = null;
+  segments.forEach((points, segmentIndex) => {
+    points.forEach((point, pointIndex) => {
+      const distance = Math.hypot(+point.x - station.x, +point.y - station.y);
+      if (!closest || distance < closest.distance) {
+        closest = { distance, point, pointIndex, points, segmentIndex };
+      }
+    });
   });
-  if (closestIndex < 0 || closestDistance > 55) return null;
+  if (!closest || closest.distance > 55) return null;
 
-  const previous = points[closestIndex - 1];
-  const next = points[closestIndex + 1];
-  const point = points[closestIndex];
+  const previous = closest.points[closest.pointIndex - 1];
+  const next = closest.points[closest.pointIndex + 1];
+  const point = closest.point;
   let dx = 0;
   let dy = 0;
   if (previous && next) {
@@ -221,8 +238,8 @@ function directionFromRoutePath(line, station) {
     lineId: line.id,
     type: line.type,
     code: line.code,
-    order: closestIndex,
-    index: closestIndex,
+    order: closest.segmentIndex * 1000 + closest.pointIndex,
+    index: closest.pointIndex,
     dx: dx / length,
     dy: dy / length,
     angle: Math.atan2(dy, dx) * 180 / Math.PI,
@@ -235,6 +252,13 @@ function buildStationLayout(data) {
   data.lines.forEach((line) => {
     const members = sortedMembers(line);
     members.forEach((member, index) => {
+      const station = data.stations.find((item) => item.id === member.stationId);
+      const pathDirection = station ? directionFromRoutePath(line, station) : null;
+      if (pathDirection && layout.has(member.stationId)) {
+        layout.get(member.stationId).directions.push(pathDirection);
+        return;
+      }
+
       const previous = members[index - 1];
       const next = members[index + 1];
       let dx = 0;
@@ -396,9 +420,9 @@ function render(data) {
     .attr("height", data.canvas.height);
   drawGrid(data.canvas.width, data.canvas.height);
 
-  const drawableLines = data.lines.filter((line) => line.points.length > 1);
+  const drawableLines = drawableRouteSegments(data.lines);
   routeLayer.selectAll("path")
-    .data(drawableLines, (d) => d.id)
+    .data(drawableLines, (d) => `${d.id}-${d.segmentIndex}`)
     .join("path")
     .attr("class", "route-line")
     .attr("d", (d) => routePath(d.points))
@@ -453,7 +477,7 @@ function render(data) {
   });
 
   lineFilters.selectAll("button")
-    .data(data.lines.filter((line) => line.points.length > 1), (d) => d.id)
+    .data(data.lines.filter((line) => routeSegments(line).length), (d) => d.id)
     .join("button")
     .attr("class", "line-button")
     .style("border-color", (d) => d.color)
