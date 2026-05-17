@@ -15,6 +15,7 @@ const stationSuggestions = document.querySelector("#stationSuggestions");
 
 let mapData = null;
 let selectedLineId = null;
+let selectedLineIds = new Set();
 let selectedStationId = null;
 let currentTransform = d3.zoomIdentity;
 let stationLayout = new Map();
@@ -27,6 +28,8 @@ const LABEL_ROUTE_GAP = 8;
 const LABEL_TEXT_DESCENT = 3;
 const LABEL_STACK_GAP = 6;
 const SVG_NS = "http://www.w3.org/2000/svg";
+const MAP_CONTENT_MIN_X = 595;
+const INITIAL_MAP_PADDING = 12;
 
 const zoom = d3.zoom()
   .scaleExtent([0.18, 9])
@@ -139,7 +142,30 @@ function stationMatchesQuery(station, query) {
 }
 
 function visibleByLine(d) {
-  return !selectedLineId || d.lines?.some((line) => line.id === selectedLineId);
+  return !hasLineSelection() || d.lines?.some((line) => lineIsSelected(line.id));
+}
+
+function hasLineSelection() {
+  return selectedLineId !== null || selectedLineIds.size > 0;
+}
+
+function lineIsSelected(lineId) {
+  return selectedLineIds.size ? selectedLineIds.has(lineId) : selectedLineId === lineId;
+}
+
+function clearLineSelection() {
+  selectedLineId = null;
+  selectedLineIds = new Set();
+}
+
+function setSingleLineSelection(lineId) {
+  selectedLineId = lineId;
+  selectedLineIds = lineId === null ? new Set() : new Set([lineId]);
+}
+
+function setStationLineSelection(station) {
+  selectedLineId = null;
+  selectedLineIds = new Set(station.lines.map((line) => line.id));
 }
 
 function routePath(points) {
@@ -459,6 +485,17 @@ function matchingStations(query) {
     .map((item) => item.station);
 }
 
+function exactStationMatch(query) {
+  const normalizedQuery = normalizeLabel(query);
+  if (!normalizedQuery || !mapData) return null;
+  return mapData.stations.find((station) => {
+    const names = [displayStationName(station), station.rawName]
+      .filter(Boolean)
+      .map(normalizeLabel);
+    return names.some((name) => name === normalizedQuery);
+  }) || null;
+}
+
 function renderStationSuggestions() {
   const query = searchInput.value.trim();
   suggestionStations = matchingStations(query);
@@ -512,9 +549,10 @@ function hideStationSuggestions() {
 
 function selectStationSuggestion(station) {
   selectedStationId = station.id;
-  selectedLineId = null;
+  setStationLineSelection(station);
   searchInput.value = displayStationName(station);
   hideStationSuggestions();
+  resetZoom();
   updateSelection();
   showStationDetails(station);
 }
@@ -592,7 +630,8 @@ function render(data) {
     .attr("stroke-width", (d) => routeStrokeWidth(d))
     .on("click", (event, d) => {
       event.stopPropagation();
-      selectedLineId = selectedLineId === d.id ? null : d.id;
+      const alreadySelected = selectedLineIds.size === 1 && selectedLineIds.has(d.id);
+      setSingleLineSelection(alreadySelected ? null : d.id);
       selectedStationId = null;
       updateSelection();
       showLineDetails(d);
@@ -609,16 +648,20 @@ function render(data) {
     .on("click", (event, d) => {
       event.stopPropagation();
       selectedStationId = selectedStationId === d.id ? null : d.id;
-      selectedLineId = null;
+      clearLineSelection();
       updateSelection();
       showStationDetails(d);
     });
 
   stations.selectAll(".station-marker").remove();
+  stations.selectAll(".station-pulse").remove();
   stations.each(function (d) {
     const marker = stationLayout.get(d.id)?.marker || markerForStation(d, null);
-    const node = document.createElementNS(SVG_NS, marker.shape === "capsule" ? "rect" : "circle");
-    d3.select(this).append(() => node)
+    const pulseNode = document.createElementNS(SVG_NS, marker.shape === "capsule" ? "rect" : "circle");
+    const markerNode = document.createElementNS(SVG_NS, marker.shape === "capsule" ? "rect" : "circle");
+    d3.select(this).append(() => pulseNode)
+      .attr("class", `station-pulse station-${marker.shape}`);
+    d3.select(this).append(() => markerNode)
       .attr("class", `station-marker station-${marker.shape}`);
   });
 
@@ -648,21 +691,22 @@ function render(data) {
     .join("button")
     .attr("class", "line-button")
     .style("border-color", (d) => d.color)
-    .style("background", (d) => selectedLineId === d.id ? d.color : "#eef1f6")
-    .style("color", (d) => selectedLineId === d.id ? "#fff" : "#111827")
+    .style("background", (d) => lineIsSelected(d.id) ? d.color : "#eef1f6")
+    .style("color", (d) => lineIsSelected(d.id) ? "#fff" : "#111827")
     .text((d) => lineLabel(d))
     .attr("title", (d) => d.name)
     .on("click", (event, d) => {
-      selectedLineId = selectedLineId === d.id ? null : d.id;
+      const alreadySelected = selectedLineIds.size === 1 && selectedLineIds.has(d.id);
+      setSingleLineSelection(alreadySelected ? null : d.id);
       selectedStationId = null;
       hideStationSuggestions();
       updateSelection();
-      if (selectedLineId) showLineDetails(d);
+      if (lineIsSelected(d.id)) showLineDetails(d);
       else resetDetails();
     });
 
   svg.on("click", () => {
-    selectedLineId = null;
+    clearLineSelection();
     selectedStationId = null;
     searchInput.value = "";
     hideStationSuggestions();
@@ -676,15 +720,16 @@ function render(data) {
 }
 
 function updateSelection() {
-  const query = searchInput.value.trim().toLocaleLowerCase();
+  const query = searchInput.value.trim();
+  const filteringBySelectedLines = hasLineSelection();
 
   routeLayer.selectAll("path")
-    .classed("is-muted", (d) => selectedLineId && d.id !== selectedLineId)
-    .classed("is-focus", (d) => selectedLineId === d.id);
+    .classed("is-muted", (d) => filteringBySelectedLines && !lineIsSelected(d.id))
+    .classed("is-focus", (d) => lineIsSelected(d.id));
 
   stationLayer.selectAll(".station")
     .classed("is-muted", (d) => {
-      if (selectedLineId && !visibleByLine(d)) return true;
+      if (filteringBySelectedLines) return !visibleByLine(d);
       if (query && !stationMatchesQuery(d, query)) return true;
       return false;
     })
@@ -693,15 +738,15 @@ function updateSelection() {
 
   labelLayer.selectAll("g.station-label")
     .classed("is-muted", (d) => {
-      if (selectedLineId && !visibleByLine(d)) return true;
+      if (filteringBySelectedLines) return !visibleByLine(d);
       if (query && !stationMatchesQuery(d, query)) return true;
       return false;
     });
 
   lineFilters.selectAll("button")
-    .classed("is-active", (d) => selectedLineId === d.id)
-    .style("background", (d) => selectedLineId === d.id ? d.color : "#eef1f6")
-    .style("color", (d) => selectedLineId === d.id ? "#fff" : "#111827");
+    .classed("is-active", (d) => lineIsSelected(d.id))
+    .style("background", (d) => lineIsSelected(d.id) ? d.color : "#eef1f6")
+    .style("color", (d) => lineIsSelected(d.id) ? "#fff" : "#111827");
 
   updateLabelVisibility();
 }
@@ -713,7 +758,7 @@ function updateLabelVisibility() {
     .attr("display", (d) => {
       const selected = selectedStationId === d.id;
       const hit = query && stationMatchesQuery(d, query);
-      const onLine = selectedLineId && visibleByLine(d);
+      const onLine = hasLineSelection() && visibleByLine(d);
       return scale > 2.05 || selected || hit || onLine ? null : "none";
     });
   updateLabelGeometry();
@@ -758,7 +803,7 @@ function labelPriority(d) {
   const query = searchInput.value.trim().toLocaleLowerCase();
   if (selectedStationId === d.id) return 4;
   if (query && stationMatchesQuery(d, query)) return 3;
-  if (selectedLineId && visibleByLine(d)) return 2;
+  if (hasLineSelection() && visibleByLine(d)) return 2;
   return 1;
 }
 
@@ -907,8 +952,9 @@ function resetZoom() {
   const node = svg.node();
   const width = node.clientWidth || 1000;
   const height = node.clientHeight || 700;
-  const scale = Math.min(width / mapData.canvas.width, height / mapData.canvas.height) * 0.95;
-  const tx = (width - mapData.canvas.width * scale) / 2;
+  const contentWidth = Math.max(mapData.canvas.width - MAP_CONTENT_MIN_X, 1);
+  const scale = Math.min(width / contentWidth, height / mapData.canvas.height) * 0.97;
+  const tx = INITIAL_MAP_PADDING - MAP_CONTENT_MIN_X * scale;
   const ty = (height - mapData.canvas.height * scale) / 2;
   svg.transition().duration(350).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
 }
@@ -923,7 +969,7 @@ document.querySelector("#zoomOut").addEventListener("click", () => {
 
 document.querySelector("#zoomReset").addEventListener("click", resetZoom);
 document.querySelector("#clearSelection").addEventListener("click", () => {
-  selectedLineId = null;
+  clearLineSelection();
   selectedStationId = null;
   searchInput.value = "";
   hideStationSuggestions();
@@ -932,8 +978,19 @@ document.querySelector("#clearSelection").addEventListener("click", () => {
 });
 
 searchInput.addEventListener("input", () => {
-  selectedStationId = null;
   renderStationSuggestions();
+  const station = exactStationMatch(searchInput.value);
+  if (station) {
+    const changedStation = selectedStationId !== station.id;
+    selectedStationId = station.id;
+    setStationLineSelection(station);
+    hideStationSuggestions();
+    if (changedStation) resetZoom();
+    showStationDetails(station);
+  } else {
+    selectedStationId = null;
+    clearLineSelection();
+  }
   updateSelection();
 });
 

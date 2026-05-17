@@ -28,7 +28,7 @@ input {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -37,7 +37,7 @@ input {
   flex-direction: column;
   gap: 18px;
   min-width: 0;
-  padding: 20px;
+  padding: 14px;
   background: var(--surface);
   border-right: 1px solid var(--line);
 }
@@ -327,8 +327,22 @@ p {
   vector-effect: non-scaling-stroke;
 }
 
+.station-pulse {
+  display: none;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  opacity: 0;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
 .station-capsule {
   fill: #fff;
+}
+
+.station-pulse.station-capsule {
+  fill: none;
 }
 
 .station.is-muted {
@@ -340,6 +354,26 @@ p {
   fill: #fff2f4;
   stroke: var(--accent);
   stroke-width: 3.5;
+}
+
+.station.is-selected .station-pulse {
+  display: block;
+  animation: stationPulse 1.15s ease-out infinite;
+}
+
+@keyframes stationPulse {
+  0% {
+    opacity: 0.9;
+    stroke-width: 3;
+  }
+  70% {
+    opacity: 0;
+    stroke-width: 14;
+  }
+  100% {
+    opacity: 0;
+    stroke-width: 14;
+  }
 }
 
 .station-label {
